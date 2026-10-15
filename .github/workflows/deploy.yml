@@ -1,0 +1,100 @@
+name: Build and deploy to GitHub Pages
+
+# GitHub Pages cannot build TypeScript by itself. This workflow does the build on
+# GitHub's servers (where npm works) and publishes the result.
+#
+# It supports two repository layouts:
+#   1. The normal one: package.json is at the top of the repository.
+#   2. The "phone upload" one: the repository only holds this workflow and one
+#      project .zip file. The zip is unpacked here, so no folders need uploading.
+#
+# One-time setting: Settings -> Pages -> Build and deployment -> Source: GitHub Actions
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Find the project
+        run: |
+          if [ -f package.json ]; then
+            echo "Project found at the repository root."
+            echo "PROJECT_DIR=." >> "$GITHUB_ENV"
+          else
+            ZIP=$(ls -1 ./*.zip 2>/dev/null | head -n 1 || true)
+            if [ -z "$ZIP" ]; then
+              echo "::error::No package.json and no .zip file found in the repository root. Upload the project zip."
+              exit 1
+            fi
+            echo "Unpacking $ZIP"
+            mkdir -p _project
+            unzip -q "$ZIP" -d _project
+            PKG=$(find _project -maxdepth 3 -name package.json -not -path "*/node_modules/*" | head -n 1)
+            if [ -z "$PKG" ]; then
+              echo "::error::The zip does not contain a package.json."
+              exit 1
+            fi
+            echo "PROJECT_DIR=$(dirname "$PKG")" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install dependencies
+        run: cd "$PROJECT_DIR" && npm install --no-audit --no-fund
+
+      - name: Type check (informational)
+        continue-on-error: true
+        run: cd "$PROJECT_DIR" && npm run type-check
+
+      - name: Unit tests (informational)
+        continue-on-error: true
+        run: cd "$PROJECT_DIR" && npm test
+
+      - name: Build
+        run: cd "$PROJECT_DIR" && npm run build
+
+      - name: Check the build output
+        run: |
+          cd "$PROJECT_DIR/dist"
+          ls -la
+          test -f index.html
+          ls weights | wc -l
+          ls wasm 2>/dev/null || echo "::warning::No wasm folder in the build. The app will fall back to a CDN copy of the demuxer."
+
+      - name: Prepare Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload the site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ env.PROJECT_DIR }}/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
